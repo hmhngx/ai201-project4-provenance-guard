@@ -3,9 +3,9 @@ from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-from detection.llm_signal import classify_with_llm
+from detection.pipeline import run_detection_pipeline
 from audit.logger import AuditLogger
-from config import RATE_LIMIT, MAX_CONTENT_CHARS, MIN_CONTENT_WORDS, HUMAN_THRESHOLD, AI_THRESHOLD
+from config import RATE_LIMIT, MAX_CONTENT_CHARS, MIN_CONTENT_WORDS
 
 _logger_instance = None
 
@@ -17,46 +17,6 @@ def get_logger() -> AuditLogger:
         _logger_instance = AuditLogger(db_path=db_path)
         _logger_instance.init_db()
     return _logger_instance
-
-
-def _score_to_attribution(score: float) -> str:
-    if score < HUMAN_THRESHOLD:
-        return "human"
-    if score > AI_THRESHOLD:
-        return "ai"
-    return "uncertain"
-
-
-def _generate_label(attribution: str) -> dict:
-    if attribution == "human":
-        return {
-            "verdict": "Likely Human-Written",
-            "confidence_display": "High",
-            "detail": (
-                "Our system analyzed this content and found strong indicators of human authorship. "
-                "This is an automated assessment and is not guaranteed to be correct. "
-                "If you are the creator and believe this label is incorrect, you may submit an appeal."
-            ),
-        }
-    if attribution == "ai":
-        return {
-            "verdict": "Likely AI-Generated",
-            "confidence_display": "High",
-            "detail": (
-                "Our system found strong indicators that this content may have been AI-generated. "
-                "This is an automated assessment and may be incorrect. "
-                "If you are the creator and believe this label is incorrect, you may submit an appeal."
-            ),
-        }
-    return {
-        "verdict": "Authorship Uncertain",
-        "confidence_display": "Low — this content has not been labeled as AI-generated",
-        "detail": (
-            "Our system detected mixed signals and cannot determine authorship with confidence. "
-            "This content has not been flagged as AI-generated. "
-            "If you are the creator and disagree with this assessment, you may submit an appeal."
-        ),
-    }
 
 
 def create_app(testing: bool = False) -> Flask:
@@ -96,33 +56,23 @@ def create_app(testing: bool = False) -> Flask:
         if len(content.split()) < MIN_CONTENT_WORDS:
             return jsonify({"error": f"content must have at least {MIN_CONTENT_WORDS} words"}), 400
 
-        # Signal 1: LLM classifier
-        llm_result = classify_with_llm(content)
-        llm_score = llm_result.score
-
-        # Signal 2: stylometric (placeholder until Milestone 4)
-        stylometric_score = 0.5
-
-        # Confidence: weighted average (M4 will use real stylometric)
-        confidence_score = round((0.60 * llm_score) + (0.40 * stylometric_score), 4)
-        attribution = _score_to_attribution(confidence_score)
-        label = _generate_label(attribution)
+        result = run_detection_pipeline(content)
 
         content_id = get_logger().log_decision(
             creator_id=creator_id,
             content_snippet=content[:500],
-            llm_score=llm_score,
-            stylometric_score=stylometric_score,
-            confidence_score=confidence_score,
-            attribution=attribution,
-            transparency_label=label["verdict"],
+            llm_score=result.llm_score,
+            stylometric_score=result.stylometric_score,
+            confidence_score=result.confidence_score,
+            attribution=result.attribution,
+            transparency_label=result.transparency_label["verdict"],
         )
 
         return jsonify({
             "content_id": content_id,
-            "attribution_result": attribution,
-            "confidence_score": confidence_score,
-            "transparency_label": label,
+            "attribution_result": result.attribution,
+            "confidence_score": result.confidence_score,
+            "transparency_label": result.transparency_label,
         })
 
     @app.route("/log", methods=["GET"])

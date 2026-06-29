@@ -1,12 +1,26 @@
 import pytest
 import json
 import os
-from unittest.mock import patch
-from detection.llm_signal import LLMResult
+from unittest.mock import patch, MagicMock
+from detection.pipeline import PipelineResult
 
 
-def _mock_llm(score=0.20):
-    return LLMResult(score=score, raw_response=str(score))
+def _mock_pipeline(attribution="human", confidence=0.20, llm=0.15, stylo=0.28):
+    return PipelineResult(
+        attribution=attribution,
+        confidence_score=confidence,
+        llm_score=llm,
+        stylometric_score=stylo,
+        transparency_label={
+            "verdict": "Likely Human-Written",
+            "confidence_display": "High",
+            "detail": (
+                "Our system found strong indicators of human authorship. "
+                "If you are the creator and believe this label is incorrect, "
+                "you may submit an appeal."
+            ),
+        },
+    )
 
 
 @pytest.fixture
@@ -26,7 +40,7 @@ _VALID_CONTENT = (
 
 
 def test_submit_returns_200_with_all_fields(client):
-    with patch("app.classify_with_llm", return_value=_mock_llm(0.20)):
+    with patch("app.run_detection_pipeline", return_value=_mock_pipeline()):
         resp = client.post(
             "/submit",
             json={"content": _VALID_CONTENT, "creator_id": "user_1"},
@@ -38,6 +52,15 @@ def test_submit_returns_200_with_all_fields(client):
     assert "attribution_result" in data
     assert "confidence_score" in data
     assert "transparency_label" in data
+
+
+def test_submit_accepts_text_field_alias(client):
+    with patch("app.run_detection_pipeline", return_value=_mock_pipeline()):
+        resp = client.post(
+            "/submit",
+            json={"text": _VALID_CONTENT, "creator_id": "user_1"},
+        )
+    assert resp.status_code == 200
 
 
 def test_submit_returns_400_on_missing_content(client):
@@ -55,22 +78,22 @@ def test_submit_returns_400_on_too_short_content(client):
     assert resp.status_code == 400
 
 
-def test_submit_writes_to_audit_log(client):
-    with patch("app.classify_with_llm", return_value=_mock_llm(0.20)):
-        client.post(
-            "/submit",
-            json={"content": _VALID_CONTENT, "creator_id": "user_1"},
-        )
+def test_submit_writes_both_signal_scores_to_audit_log(client):
+    with patch("app.run_detection_pipeline",
+               return_value=_mock_pipeline(llm=0.15, stylo=0.28)):
+        client.post("/submit", json={"content": _VALID_CONTENT, "creator_id": "user_1"})
     resp = client.get("/log")
     data = json.loads(resp.data)
     assert len(data["entries"]) == 1
     entry = data["entries"][0]
     assert entry["creator_id"] == "user_1"
+    assert entry["llm_score"] == 0.15
+    assert entry["stylometric_score"] == 0.28
     assert entry["status"] == "classified"
 
 
 def test_log_returns_entries_list(client):
-    with patch("app.classify_with_llm", return_value=_mock_llm()):
+    with patch("app.run_detection_pipeline", return_value=_mock_pipeline()):
         client.post("/submit", json={"content": _VALID_CONTENT, "creator_id": "u1"})
         client.post("/submit", json={"content": _VALID_CONTENT, "creator_id": "u2"})
     resp = client.get("/log")
