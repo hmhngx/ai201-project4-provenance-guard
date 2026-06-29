@@ -107,3 +107,77 @@ def test_health_returns_ok(client):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert json.loads(resp.data)["status"] == "ok"
+
+
+# ── Appeal endpoint tests ────────────────────────────────────────────────────
+
+def _submit_and_get_id(client):
+    """Helper: submit content and return the content_id."""
+    with patch("app.run_detection_pipeline", return_value=_mock_pipeline()):
+        resp = client.post("/submit", json={"content": _VALID_CONTENT, "creator_id": "user_1"})
+    return json.loads(resp.data)["content_id"]
+
+
+def test_appeal_returns_200_with_under_review_status(client):
+    content_id = _submit_and_get_id(client)
+    resp = client.post("/appeal", json={
+        "content_id": content_id,
+        "creator_id": "user_1",
+        "reason": "I wrote this myself from personal experience.",
+    })
+    assert resp.status_code == 200
+    data = json.loads(resp.data)
+    assert data["status"] == "under_review"
+    assert "appeal_id" in data
+    assert data["content_id"] == content_id
+
+
+def test_appeal_accepts_creator_reasoning_alias(client):
+    """Milestone spec uses 'creator_reasoning' as field name — accept both."""
+    content_id = _submit_and_get_id(client)
+    resp = client.post("/appeal", json={
+        "content_id": content_id,
+        "creator_id": "user_1",
+        "creator_reasoning": "I wrote this myself.",
+    })
+    assert resp.status_code == 200
+    assert json.loads(resp.data)["status"] == "under_review"
+
+
+def test_appeal_updates_status_in_audit_log(client):
+    content_id = _submit_and_get_id(client)
+    client.post("/appeal", json={
+        "content_id": content_id,
+        "creator_id": "user_1",
+        "reason": "I wrote this myself.",
+    })
+    log_resp = client.get("/log")
+    entries = json.loads(log_resp.data)["entries"]
+    entry = next(e for e in entries if e["content_id"] == content_id)
+    assert entry["status"] == "under_review"
+    assert len(entry["appeals"]) == 1
+    assert "I wrote this myself" in entry["appeals"][0]["reason"]
+
+
+def test_appeal_returns_404_on_unknown_content_id(client):
+    resp = client.post("/appeal", json={
+        "content_id": "cnt_doesnotexist",
+        "creator_id": "user_1",
+        "reason": "I wrote this.",
+    })
+    assert resp.status_code == 404
+
+
+def test_appeal_returns_400_on_creator_mismatch(client):
+    content_id = _submit_and_get_id(client)
+    resp = client.post("/appeal", json={
+        "content_id": content_id,
+        "creator_id": "user_wrong",
+        "reason": "I wrote this.",
+    })
+    assert resp.status_code == 400
+
+
+def test_appeal_returns_400_on_missing_fields(client):
+    resp = client.post("/appeal", json={"content_id": "cnt_abc"})
+    assert resp.status_code == 400

@@ -5,6 +5,7 @@ from flask_limiter.util import get_remote_address
 
 from detection.pipeline import run_detection_pipeline
 from audit.logger import AuditLogger
+from appeals.handler import process_appeal, AppealError
 from config import RATE_LIMIT, MAX_CONTENT_CHARS, MIN_CONTENT_WORDS
 
 _logger_instance = None
@@ -74,6 +75,33 @@ def create_app(testing: bool = False) -> Flask:
             "confidence_score": result.confidence_score,
             "transparency_label": result.transparency_label,
         })
+
+    @app.route("/appeal", methods=["POST"])
+    @limiter.limit(RATE_LIMIT)
+    def appeal():
+        body = request.get_json(silent=True) or {}
+        content_id = body.get("content_id", "").strip()
+        creator_id = body.get("creator_id", "").strip()
+        # Accept both "reason" and "creator_reasoning" field names
+        reason = (body.get("reason") or body.get("creator_reasoning") or "").strip()
+
+        if not content_id or not creator_id or not reason:
+            return jsonify({
+                "error": "content_id, creator_id, and reason (or creator_reasoning) are required"
+            }), 400
+
+        try:
+            result = process_appeal(
+                content_id=content_id,
+                creator_id=creator_id,
+                reason=reason,
+                logger=get_logger(),
+            )
+            return jsonify(result)
+        except AppealError as e:
+            msg = str(e)
+            status_code = 404 if "not found" in msg else 400
+            return jsonify({"error": msg}), status_code
 
     @app.route("/log", methods=["GET"])
     @limiter.exempt
